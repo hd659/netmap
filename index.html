@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>代理路径</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--fg:#1b1f24;--mute:#6b7380;--line:#e3e6ea;--ok:#1a8f4c;--warn:#c98a00;--bad:#d23c3c;--off:#a0a7b1}
+@media (prefers-color-scheme:dark){:root{--bg:#14161a;--card:#1d2026;--fg:#e8eaed;--mute:#8d95a1;--line:#2c3038;--ok:#3ec27a;--warn:#e0aa2e;--bad:#ef6a6a;--off:#5c636e}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;padding:16px;max-width:1200px}
+h1{font-size:16px;margin:0 0 12px;font-weight:600}
+.sub{color:var(--mute);font-size:12px}
+.top{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+.chip{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 10px;display:flex;align-items:center;gap:6px}
+.dot{width:9px;height:9px;border-radius:50%;flex:none}
+.ok .dot,.dot.ok{background:var(--ok)}.warn .dot,.dot.warn{background:var(--warn)}.bad .dot,.dot.bad{background:var(--bad)}.off .dot,.dot.off{background:var(--off)}
+.route{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:12px}
+.route h2{font-size:14px;margin:0;font-weight:600}
+.path{display:flex;flex-wrap:wrap;align-items:stretch;gap:6px;margin-top:10px}
+.node{border:1px solid var(--line);border-left:4px solid var(--off);border-radius:8px;padding:6px 10px;min-width:120px}
+.node.ok{border-left-color:var(--ok)}.node.warn{border-left-color:var(--warn)}.node.bad{border-left-color:var(--bad)}
+.node.off{opacity:.65}
+.node b{display:block;font-weight:600;font-size:13px}
+.arrow{align-self:center;color:var(--mute)}
+.dest{align-self:center;font-weight:600}
+.tag{font-size:11px;color:var(--mute);display:block}
+.warnline{margin-top:8px;color:var(--warn);font-size:13px}
+.legend{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-size:13px}
+.legend p{margin:4px 0}
+</style>
+</head>
+<body>
+<h1>代理路径 <span class="sub" id="upd">读取中...</span></h1>
+<div class="top" id="top"></div>
+<div id="routes"></div>
+<div class="legend">
+  <p><b>怎么看这张图</b>：每一行是一类程序，从左到右是它的流量依次经过的地方，最右边是网站最后看到的 IP。</p>
+  <p>绿色：通。红色：断了或配置有问题。黄色：开着，会影响路线。灰色：没在用。</p>
+  <p>三层关系：程序自己配的代理只管它自己（Antigravity、AdsPower）；系统代理管所有没自己配代理的程序（Claude、Chrome）；VPN 在最底下，所有流量都会经过它。</p>
+  <p>出口 IP 每 60 秒实测一次，其他状态每 10 秒刷新。页面关掉 10 分钟后后台自动退出。</p>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const node=(n,tag)=>'<div class="node '+n.status+'">'+(tag?'<span class="tag">'+tag+'</span>':'')+'<b>'+esc(n.label)+'</b><span class="sub">'+esc(n.sub)+'</span></div>';
+const arrow='<span class="arrow">→</span>';
+async function tick(){
+  let s;
+  try{s=await (await fetch('/api/state')).json()}catch(e){$('upd').textContent='后台没在运行';return}
+  if(!s.checked){$('upd').textContent='第一次检测中...';return}
+  $('upd').textContent='更新于 '+new Date(s.checked*1000).toLocaleTimeString('zh-CN',{hour12:false});
+  $('top').innerHTML=s.top.map(t=>'<div class="chip '+t.status+'"><span class="dot"></span>'+esc(t.label)+'<span class="sub">'+esc(t.sub)+'</span></div>').join('');
+  $('routes').innerHTML=s.routes.map(r=>'<div class="route"><h2>'+esc(r.name)+'</h2><div class="sub">'+esc(r.note)+'</div><div class="path">'
+    +node(r.app,'程序')+arrow+r.hops.map(h=>node(h)).join(arrow)+arrow+node(r.exit,'出口 IP')+arrow+'<span class="dest">'+esc(r.dest)+'</span></div>'
+    +(r.warn?'<div class="warnline">'+esc(r.warn)+'</div>':'')+'</div>').join('');
+}
+tick();setInterval(tick,5000);
+</script>
+</body>
+</html>
