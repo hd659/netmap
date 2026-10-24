@@ -91,3 +91,39 @@ def test_no_private_endpoints_hardcoded():
     src = open(server.__file__, encoding="utf-8").read()
     assert "831800" not in src and "149.28." not in src
     assert server.DOMAIN == os.environ.get("GATEWAY_PUBLIC_HOST", "api.example.com")
+
+
+def _m(status, ms):
+    return {"status": status, "ttfb_ms": ms}
+
+
+def test_diagnose_flags_split_hijack_via_cn_exit():
+    probes = {
+        "direct": {"youtube": _m("ok", 120), "claude": _m("ok", 200), "baidu": _m("ok", 300)},
+        "system": {"youtube": _m("bad", None), "claude": _m("ok", 700), "baidu": _m("ok", 40)},
+    }
+    a = server.diagnose(probes, "CN")
+    assert a[0]["code"] == "split_hijack" and a[0]["level"] == "bad"
+    assert set(a[0]["targets"]) == {"youtube", "claude"} and "CN" in a[0]["detail"]
+    assert not any(x["code"] == "cn_detour" for x in a)
+
+
+def test_diagnose_ignores_when_direct_also_broken_and_flags_congestion():
+    probes = {
+        "direct": {"youtube": _m("bad", None), "claude": _m("warn", 1200), "baidu": _m("ok", 30)},
+        "system": {"youtube": _m("bad", None), "claude": _m("warn", 1500), "baidu": _m("ok", 35)},
+    }
+    codes = [x["code"] for x in server.diagnose(probes, "JP")]
+    assert codes == ["congestion"]
+
+
+def test_diagnose_cn_detour_cn_exit_and_tunnel():
+    probes = {
+        "direct": {"youtube": _m("ok", 100), "baidu": _m("ok", 30)},
+        "system": {"youtube": _m("ok", 150), "baidu": _m("ok", 400)},
+        "tunnel": {"gateway": _m("bad", None)},
+    }
+    a = server.diagnose(probes, "CN")
+    codes = [x["code"] for x in a]
+    assert codes[0] == "tunnel_down" and set(codes) == {"tunnel_down", "cn_exit", "cn_detour"}
+    assert server.diagnose({"direct": {"youtube": _m("ok", 100)}}, "") == []

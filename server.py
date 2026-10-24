@@ -32,6 +32,8 @@ PROBE_TARGETS = {
     "baidu": "https://www.baidu.com/favicon.ico",
 }
 TTFB_OK_MS, TTFB_WARN_MS = 800, 2000
+CN_TARGETS = {"baidu"}  # 其余目标都视为海外
+SLOW_RATIO = 3.0  # 经代理 TTFB >= 直连 * SLOW_RATIO 判定为“被绕远”
 CURL_FMT = "%{http_code} %{time_namelookup} %{time_connect} %{time_appconnect} %{time_starttransfer} %{remote_ip}"
 
 state = {"checked": 0, "routes": [], "top": []}
@@ -209,6 +211,74 @@ def probe_matrix(sys_proxy, tunnel_up, workers=12, run=None):
     return out
 
 
+def _ms(m):
+    return (m or {}).get("ttfb_ms")
+
+
+def diagnose(probes, sys_exit_cc=""):
+    """纯函数：探测矩阵 + 系统代理出口国家 -> 分流故障告警列表（按严重度排序）。
+
+    规则（只用直连作对照组，排除本机网络整体坏掉的情况）：
+      R1 split_hijack   海外目标经系统代理失败/超慢，而同目标直连正常 -> 海外流量被回国节点劫持
+      R2 cn_exit        系统代理出口在 CN，但海外目标确实走了它 -> 分流规则缺失（与 R1 合并为证据）
+      R3 cn_detour      国内目标经代理明显慢于直连 -> 国内流量被绕到海外
+      R4 congestion     海外目标在直连与代理两条路径都慢（但不失败）-> 上游拥塞（晚高峰）
+      R5 tunnel_down    SSH 隧道到 VPS 网关探测失败
+    """
+    alerts = []
+    direct, system = probes.get("direct") or {}, probes.get("system") or {}
+    overseas = [t for t in direct if t not in CN_TARGETS]
+
+    def worse(t):
+        d, s = direct.get(t), system.get(t)
+        if not d or not s or d.get("status") == "bad":
+            return False
+        return _ms(s) is None or s["status"] == "bad" or _ms(s) >= _ms(d) * SLOW_RATIO
+
+    hijacked = [t for t in overseas if worse(t)]
+    if hijacked:
+        cn = sys_exit_cc == "CN"
+        alerts.append({
+            "level": "bad", "code": "split_hijack", "targets": hijacked,
+            "title": "海外流量被系统代理拖垮" + ("（出口在中国，疑似回国节点）" if cn else ""),
+            "detail": f"{', '.join(hijacked)} 直连正常、经系统代理失败或慢 {SLOW_RATIO:g}x 以上；"
+                      + ("Misty 当前节点出口在 CN，请把海外域名分流到直连/海外节点，或切换节点"
+                         if cn else "检查代理分流规则是否把这些域名送进了错误的节点"),
+        })
+    elif sys_exit_cc == "CN" and system and any(t in system for t in overseas):
+        alerts.append({
+            "level": "warn", "code": "cn_exit", "targets": [],
+            "title": "系统代理出口在中国",
+            "detail": "海外目标暂时可达，但走的是回国节点，晚高峰极易拥塞，建议为海外域名单独分流",
+        })
+
+    cn_slow = [t for t in CN_TARGETS if worse(t)]
+    if cn_slow:
+        alerts.append({
+            "level": "warn", "code": "cn_detour", "targets": cn_slow,
+            "title": "国内流量被绕到代理",
+            "detail": f"{', '.join(cn_slow)} 经代理明显慢于直连，分流规则可能没有把国内域名设为 DIRECT",
+        })
+
+    congested = [t for t in overseas if t not in hijacked and direct.get(t, {}).get("status") == "warn"
+                 and system.get(t, {}).get("status", "warn") == "warn"]
+    if congested:
+        alerts.append({
+            "level": "warn", "code": "congestion", "targets": congested,
+            "title": "海外链路拥塞",
+            "detail": f"{', '.join(congested)} 各路径 TTFB 都在 {TTFB_OK_MS}-{TTFB_WARN_MS}ms，属于上游拥塞（常见于晚高峰），非本机配置问题",
+        })
+
+    tun = (probes.get("tunnel") or {}).get("gateway")
+    if tun and tun.get("status") == "bad":
+        alerts.append({
+            "level": "bad", "code": "tunnel_down", "targets": ["gateway"],
+            "title": "SSH 隧道到 VPS 网关不通",
+            "detail": f"本地 :{TUNNEL_PORT} 在监听但 /__stats 无响应，pi 的 GPT 模型会失败，重启隧道",
+        })
+    return sorted(alerts, key=lambda a: a["level"] != "bad")
+
+
 def hop(label, sub, status):
     return {"label": label, "sub": sub, "status": status}
 
@@ -362,7 +432,9 @@ def collect(full):
         hop("Tailscale", "已连接" if tailscale == "Connected" else tailscale, "ok" if tailscale == "Connected" else "off"),
         hop("SSH 隧道", "正常" if tun_pid else "断开", "ok" if tun_pid else "bad"),
     ]
-    state.update({"checked": time.time(), "routes": routes, "top": top, "sp": sp})
+    sys_g = ips.get("system") if sp["mode"] != "off" else None
+    alerts = diagnose(state.get("probes") or {}, (sys_g or {}).get("cc", ""))
+    state.update({"checked": time.time(), "routes": routes, "top": top, "sp": sp, "alerts": alerts})
 
 
 def loop():
